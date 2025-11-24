@@ -53,6 +53,7 @@ import (
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	kubefeatures "k8s.io/kubernetes/pkg/features"
 
+	schedulingqueue "k8s.io/kubernetes/pkg/scheduler/backend/queue"
 	k8sframework "k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/dynamicresources"
 	"k8s.io/kubernetes/pkg/scheduler/util/assumecache"
@@ -179,6 +180,10 @@ type SchedulerCache struct {
 
 	// sharedDRAManager is used in DRA plugin, contains resourceClaimTracker, resourceSliceLister and deviceClassLister
 	sharedDRAManager k8sframework.SharedDRAManager
+
+	// TODO: These fields are added for agent fast path scheduler
+	fastPathSchedulingQueue schedulingqueue.SchedulingQueue
+	fastPathSchedulerName   string
 }
 
 type multiSchedulerInfo struct {
@@ -584,6 +589,17 @@ func newSchedulerCache(config *rest.Config, schedulerNames []string, defaultQueu
 	// add all events handlers
 	sc.addEventHandler()
 	sc.HyperNodesInfo = schedulingapi.NewHyperNodesInfo(sc.nodeInformer.Lister())
+
+	// init agent fast path scheduler related fields
+	sc.fastPathSchedulingQueue = schedulingqueue.NewSchedulingQueue(
+		Less,
+		sc.informerFactory,
+		schedulingqueue.WithClock(defaultSchedulerOptions.clock),
+		schedulingqueue.WithPodInitialBackoffDuration(time.Duration(defaultSchedulerOptions.podInitialBackoffSeconds)*time.Second),
+		schedulingqueue.WithPodMaxBackoffDuration(time.Duration(defaultSchedulerOptions.podMaxBackoffSeconds)*time.Second),
+		schedulingqueue.WithPodMaxInUnschedulablePodsDuration(defaultSchedulerOptions.podMaxInUnschedulablePodsDuration),
+	)
+
 	return sc
 }
 
@@ -691,6 +707,66 @@ func (sc *SchedulerCache) addEventHandler() {
 				AddFunc:    sc.AddPod,
 				UpdateFunc: sc.UpdatePod,
 				DeleteFunc: sc.DeletePod,
+			},
+		})
+
+	// pod handlers for agent fast path scheduler
+	// 1. Pods already scheduled, refresh its state in cache
+	sc.podInformer.Informer().AddEventHandler(
+		cache.FilteringResourceEventHandler{
+			FilterFunc: func(obj interface{}) bool {
+				switch v := obj.(type) {
+				case *v1.Pod:
+					if len(v.Spec.NodeName) != 0 {
+						return true
+					}
+					return false
+				case cache.DeletedFinalStateUnknown:
+					if _, ok := v.Obj.(*v1.Pod); ok {
+						// The carried object may be stale, always pass to clean up stale obj in event handlers.
+						return true
+					}
+					klog.Errorf("Cannot convert object %T to *v1.Pod", v.Obj)
+					return false
+				default:
+					klog.ErrorS(nil, "Unable to handle object", "objType", fmt.Sprintf("%T", obj), "obj", obj)
+					return false
+				}
+			},
+			Handler: cache.ResourceEventHandlerFuncs{
+				AddFunc:    sc.AddPodToCache,
+				UpdateFunc: sc.UpdatePodInCache,
+				DeleteFunc: sc.DeletePodFromCache,
+			},
+		})
+
+	// 2. Pods not scheduled yet, and needed to be scheduled by fast path scheduler, add them to fast path scheduling queue
+	sc.podInformer.Informer().AddEventHandler(
+		cache.FilteringResourceEventHandler{
+			FilterFunc: func(obj interface{}) bool {
+				switch v := obj.(type) {
+				case *v1.Pod:
+					// if the pod is not scheduled and scheduled by fast path scheduler
+					if len(v.Spec.NodeName) == 0 && v.Spec.SchedulerName == sc.fastPathSchedulerName {
+						return true
+					}
+					return false
+				case cache.DeletedFinalStateUnknown:
+					if _, ok := v.Obj.(*v1.Pod); ok {
+						// The carried object may be stale, always pass to clean up stale obj in event handlers.
+						return true
+					}
+					klog.Errorf("Cannot convert object %T to *v1.Pod", v.Obj)
+					return false
+				default:
+					klog.ErrorS(nil, "Unable to handle object", "objType", fmt.Sprintf("%T", obj), "obj", obj)
+					return false
+				}
+			},
+			Handler: cache.ResourceEventHandlerFuncs{
+				AddFunc:    sc.AddPodToSchedulingQueue,
+				UpdateFunc: sc.UpdatePodInSchedulingQueue,
+				DeleteFunc: sc.DeletePodFromSchedulingQueue,
 			},
 		})
 
