@@ -147,8 +147,6 @@ type TaskInfo struct {
 	CustomBindErrHandler func() error `json:"-"`
 	// CustomBindErrHandlerSucceeded indicates whether CustomBindErrHandler is executed successfully.
 	CustomBindErrHandlerSucceeded bool
-
-	FitErrors *FitErrors
 }
 
 func getJobID(pod *v1.Pod) JobID {
