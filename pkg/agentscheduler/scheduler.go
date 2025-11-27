@@ -34,7 +34,7 @@ import (
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 
-	"volcano.sh/volcano/cmd/scheduler/app/options"
+	"volcano.sh/volcano/cmd/agent-scheduler/app/options"
 	schedcache "volcano.sh/volcano/pkg/agentscheduler/cache"
 	"volcano.sh/volcano/pkg/agentscheduler/framework"
 	"volcano.sh/volcano/pkg/filewatcher"
