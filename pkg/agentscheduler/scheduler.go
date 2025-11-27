@@ -65,7 +65,6 @@ type Scheduler struct {
 type Worker struct {
 	framework *framework.Framework
 	actions   []framework.Action
-	mutex     sync.Mutex
 }
 
 // NewScheduler returns a Scheduler
@@ -127,15 +126,9 @@ func (worker *Worker) runOnce(index uint32) {
 	klog.V(4).Infof("Start scheduling in worker %d ...", index)
 	scheduleStartTime := time.Now()
 	defer klog.V(4).Infof("End scheduling in worker %d ...", index)
-
-	worker.mutex.Lock()
-	actions := worker.actions
-	// configurations := sched.configurations
-	worker.mutex.Unlock()
-
 	// Load ConfigMap to check which action is enabled.
 	conf.EnabledActionMap = make(map[string]bool)
-	for _, action := range actions {
+	for _, action := range worker.actions {
 		conf.EnabledActionMap[action.Name()] = true
 	}
 
@@ -143,8 +136,8 @@ func (worker *Worker) runOnce(index uint32) {
 	//taskInfo = sched.NextPod()
 
 	// TODO: Update snapshot
-	// sched.framework.UpdateSnapshot()
-	// sched.framework.OnCycleStart()
+	// worker.framework.UpdateSnapshot()
+	// worker.framework.OnCycleStart()
 	defer func() {
 		metrics.UpdateE2eDuration(metrics.Duration(scheduleStartTime))
 		// Call OnCycleEnd for all plugins
@@ -157,7 +150,7 @@ func (worker *Worker) runOnce(index uint32) {
 		}
 	}()
 
-	for _, action := range actions {
+	for _, action := range worker.actions {
 		actionStartTime := time.Now()
 		action.Execute(worker.framework)
 		metrics.UpdateActionDuration(action.Name(), metrics.Duration(actionStartTime))
