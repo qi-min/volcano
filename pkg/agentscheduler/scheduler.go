@@ -64,7 +64,6 @@ type Scheduler struct {
 
 type Worker struct {
 	framework *framework.Framework
-	actions   []framework.Action
 }
 
 // NewScheduler returns a Scheduler
@@ -105,8 +104,7 @@ func (sched *Scheduler) Run(stopCh <-chan struct{}) {
 	klog.V(2).Infof("Scheduler completes Initialization and start to run %d workers", sched.workerCount)
 	for i := range sched.workerCount {
 		worker := &Worker{}
-		worker.framework = framework.NewFramework(sched.tiers, sched.cache, sched.configurations)
-		worker.actions = sched.actions
+		worker.framework = framework.NewFramework(sched.actions, sched.tiers, sched.cache, sched.configurations)
 		index := i
 		go wait.Until(func() { worker.runOnce(index) }, 0, stopCh)
 	}
@@ -128,7 +126,7 @@ func (worker *Worker) runOnce(index uint32) {
 	defer klog.V(4).Infof("End scheduling in worker %d ...", index)
 	// Load ConfigMap to check which action is enabled.
 	conf.EnabledActionMap = make(map[string]bool)
-	for _, action := range worker.actions {
+	for _, action := range worker.framework.Actions {
 		conf.EnabledActionMap[action.Name()] = true
 	}
 
@@ -150,7 +148,7 @@ func (worker *Worker) runOnce(index uint32) {
 		}
 	}()
 
-	for _, action := range worker.actions {
+	for _, action := range worker.framework.Actions {
 		actionStartTime := time.Now()
 		action.Execute(worker.framework)
 		metrics.UpdateActionDuration(action.Name(), metrics.Duration(actionStartTime))
