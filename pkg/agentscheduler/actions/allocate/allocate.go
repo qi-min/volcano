@@ -107,18 +107,18 @@ func (alloc *Action) allocateTask(task *api.TaskInfo, nodes map[string]*api.Node
 	}
 
 	if len(predicateNodes) == 0 {
-		task.FitErrors = fitErrors
+		alloc.updateTaskStatus(task, fitErrors)
+		//TODO: push back to queue
 		return
 	}
 
 	bestNodes := alloc.prioritizeNodes(task, predicateNodes)
-	if len(bestNodes) == 0 {
-		return
+	result := &cache.PodScheduleResult{
+		SuggestedNodes: bestNodes,
+		Task:           task,
+		BindContext:    alloc.CreateBindContext(task),
 	}
-
-	alloc.EnqueueSchedulerResultForTask(task, bestNodes)
-
-	//TODO: push back to queue
+	alloc.EnqueueSchedulerResultForTask(result)
 }
 
 // prioritizeNodes selects the highest score node that idle resource meet task requirement.
@@ -134,7 +134,6 @@ func (alloc *Action) prioritizeNodes(task *api.TaskInfo, predicateNodes []*api.N
 	}
 
 	var bestNodes = []*api.NodeInfo{}
-	var higestScores = []float64{}
 	if klog.V(5).Enabled() {
 		for _, node := range idleCandidateNodes {
 			klog.V(5).Infof("node %v, idle: %v", node.Name, node.Idle)
@@ -145,7 +144,6 @@ func (alloc *Action) prioritizeNodes(task *api.TaskInfo, predicateNodes []*api.N
 		klog.V(5).Infof("Task: %v, no matching node is found in the idleCandidateNodes list.", task.Name)
 	case len(idleCandidateNodes) == 1: // If only one node after predicate, just use it.
 		bestNodes = append(bestNodes, idleCandidateNodes[0])
-		higestScores = append(higestScores)
 	case len(idleCandidateNodes) > 1: // If more than one node after predicate, using "the best" one
 		nodeScores := util.PrioritizeNodes(task, idleCandidateNodes, alloc.fwk.BatchNodeOrderFn, alloc.fwk.NodeOrderMapFn, alloc.fwk.NodeOrderReduceFn)
 
@@ -171,13 +169,12 @@ func (alloc *Action) CreateBindContext(task *api.TaskInfo) *vcache.BindContext {
 	return bindContext
 }
 
-func (alloc *Action) EnqueueSchedulerResultForTask(task *api.TaskInfo, nodeInfos []*api.NodeInfo) {
-	result := &cache.PodScheduleResult{
-		SuggestedNodes: nodeInfos,
-		Task:           task,
-		BindContext:    alloc.CreateBindContext(task),
-	}
+func (alloc *Action) EnqueueSchedulerResultForTask(result *cache.PodScheduleResult) {
 	alloc.fwk.Cache.EnqueueScheduleResult(result)
+}
+
+func (alloc *Action) updateTaskStatus(task *api.TaskInfo, fitErrors *api.FitErrors) {
+	//TODO: Update pod status
 }
 
 func (alloc *Action) predicate(task *api.TaskInfo, node *api.NodeInfo) error {
