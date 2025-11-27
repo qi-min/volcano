@@ -59,8 +59,13 @@ type Scheduler struct {
 	metricsConf        map[string]string
 	dumper             schedcache.Dumper
 	disableDefaultConf bool
-	framework          *framework.Framework
 	workerCount        uint32
+}
+
+type Worker struct {
+	framework *framework.Framework
+	actions   []framework.Action
+	mutex     sync.Mutex
 }
 
 // NewScheduler returns a Scheduler
@@ -97,11 +102,14 @@ func (sched *Scheduler) Run(stopCh <-chan struct{}) {
 	// Start cache for policy.
 	sched.cache.SetMetricsConf(sched.metricsConf)
 	sched.cache.Run(stopCh)
-	sched.framework = framework.NewFramework(sched.tiers, sched.cache, sched.configurations)
+
 	klog.V(2).Infof("Scheduler completes Initialization and start to run %d workers", sched.workerCount)
 	for i := range sched.workerCount {
+		worker := &Worker{}
+		worker.framework = framework.NewFramework(sched.tiers, sched.cache, sched.configurations)
+		worker.actions = sched.actions
 		index := i
-		go wait.Until(func() { sched.runOnce(index) }, 0, stopCh)
+		go wait.Until(func() { worker.runOnce(index) }, 0, stopCh)
 	}
 	if options.ServerOpts.EnableCacheDumper {
 		sched.dumper.ListenForSignal(stopCh)
@@ -115,15 +123,15 @@ func (sched *Scheduler) Run(stopCh <-chan struct{}) {
 
 // runOnce executes a single scheduling cycle. This function is called periodically
 // as defined by the Scheduler's schedule period.
-func (sched *Scheduler) runOnce(index uint32) {
+func (worker *Worker) runOnce(index uint32) {
 	klog.V(4).Infof("Start scheduling in worker %d ...", index)
 	scheduleStartTime := time.Now()
 	defer klog.V(4).Infof("End scheduling in worker %d ...", index)
 
-	sched.mutex.Lock()
-	actions := sched.actions
+	worker.mutex.Lock()
+	actions := worker.actions
 	// configurations := sched.configurations
-	sched.mutex.Unlock()
+	worker.mutex.Unlock()
 
 	// Load ConfigMap to check which action is enabled.
 	conf.EnabledActionMap = make(map[string]bool)
@@ -140,18 +148,18 @@ func (sched *Scheduler) runOnce(index uint32) {
 	defer func() {
 		metrics.UpdateE2eDuration(metrics.Duration(scheduleStartTime))
 		// Call OnCycleEnd for all plugins
-		if sched.framework != nil {
-			sched.framework.OnCycleEnd()
+		if worker.framework != nil {
+			worker.framework.OnCycleEnd()
 		}
 		// Clear CycleState at the end of scheduling cycle
-		if sched.framework != nil {
-			sched.framework.ClearCycleState()
+		if worker.framework != nil {
+			worker.framework.ClearCycleState()
 		}
 	}()
 
 	for _, action := range actions {
 		actionStartTime := time.Now()
-		action.Execute(sched.framework)
+		action.Execute(worker.framework)
 		metrics.UpdateActionDuration(action.Name(), metrics.Duration(actionStartTime))
 	}
 }
