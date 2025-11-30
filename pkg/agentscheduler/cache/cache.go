@@ -50,8 +50,6 @@ import (
 	k8sframework "k8s.io/kubernetes/pkg/scheduler/framework"
 	"k8s.io/kubernetes/pkg/scheduler/framework/plugins/dynamicresources"
 	"k8s.io/kubernetes/pkg/scheduler/util/assumecache"
-	"stathat.com/c/consistent"
-
 	vcclient "volcano.sh/apis/pkg/client/clientset/versioned"
 	"volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 	vcinformer "volcano.sh/apis/pkg/client/informers/externalversions"
@@ -123,10 +121,6 @@ type SchedulerCache struct {
 
 	nodeWorkers uint32
 
-	// multiSchedulerInfo holds multi schedulers info without using node selector, please see the following link for more details.
-	// https://github.com/volcano-sh/volcano/blob/master/docs/design/deploy-multi-volcano-schedulers-without-using-selector.md
-	multiSchedulerInfo
-
 	binderRegistry *BinderRegistry
 
 	// sharedDRAManager is used in DRA plugin, contains resourceClaimTracker, resourceSliceLister and deviceClassLister
@@ -173,11 +167,6 @@ func (tc *TaskCache) Delete(id schedulingapi.TaskID) {
 	tc.Lock()
 	defer tc.Unlock()
 	delete(tc.tasks, id)
-}
-
-type multiSchedulerInfo struct {
-	schedulerPodName string
-	c                *consistent.Consistent
 }
 
 type imageState struct {
