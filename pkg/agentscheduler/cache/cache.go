@@ -55,6 +55,9 @@ import (
 	vcclient "volcano.sh/apis/pkg/client/clientset/versioned"
 	"volcano.sh/apis/pkg/client/clientset/versioned/scheme"
 	vcinformer "volcano.sh/apis/pkg/client/informers/externalversions"
+	shardinformerv1alpha1 "volcano.sh/apis/pkg/client/informers/externalversions/shard/v1alpha1"
+	"volcano.sh/volcano/cmd/agent-scheduler/app/options"
+	"volcano.sh/volcano/pkg/agentscheduler/shard"
 	"volcano.sh/volcano/pkg/features"
 	"volcano.sh/volcano/pkg/scheduler/api"
 	schedulingapi "volcano.sh/volcano/pkg/scheduler/api"
@@ -75,8 +78,8 @@ func init() {
 var _ Cache = &SchedulerCache{}
 
 // New returns a Cache implementation.
-func New(config *rest.Config, schedulerNames []string, defaultQueue string, nodeSelectors []string, nodeWorkers uint32, ignoredProvisioners []string, resyncPeriod time.Duration) Cache {
-	return newSchedulerCache(config, schedulerNames, defaultQueue, nodeSelectors, nodeWorkers, ignoredProvisioners, resyncPeriod)
+func New(config *rest.Config, opt *options.ServerOption, shardCoordinator *shard.ShardCoordinator) Cache {
+	return newSchedulerCache(config, opt.SchedulerNames, opt.DefaultQueue, opt.NodeSelector, opt.NodeWorkerThreads, opt.IgnoredCSIProvisioners, opt.ResyncPeriod, opt.ShardingMode, shardCoordinator)
 }
 
 // SchedulerCache cache for the kube batch
@@ -91,17 +94,18 @@ type SchedulerCache struct {
 	nodeSelectorLabels map[string]sets.Empty
 	metricsConf        map[string]string
 
-	resyncPeriod time.Duration
-	podInformer  infov1.PodInformer
-	nodeInformer infov1.NodeInformer
-
-	Binder        Binder
-	StatusUpdater StatusUpdater
+	resyncPeriod      time.Duration
+	podInformer       infov1.PodInformer
+	nodeInformer      infov1.NodeInformer
+	nodeShardInformer shardinformerv1alpha1.NodeShardInformer
+	Binder            Binder
+	StatusUpdater     StatusUpdater
 
 	Recorder record.EventRecorder
 
-	Nodes    map[string]*schedulingapi.NodeInfo // TODO: do we need to also add a seperate lock for Nodes cache?
-	NodeList []string
+	Nodes      map[string]*schedulingapi.NodeInfo // TODO: do we need to also add a seperate lock for Nodes cache?
+	NodeList   []string
+	NodeShards map[string]*schedulingapi.NodeShardInfo
 
 	taskCache *TaskCache
 
@@ -125,7 +129,10 @@ type SchedulerCache struct {
 	// sharedDRAManager is used in DRA plugin, contains resourceClaimTracker, resourceSliceLister and deviceClassLister
 	sharedDRAManager k8sframework.SharedDRAManager
 
+	// ConflictAwareBinder resolve confilct caused by multi workers parallel allocation
 	ConflictAwareBinder *ConflictAwareBinder
+
+	ShardCoordinator *shard.ShardCoordinator
 
 	// schedulingQueue is used to store pods waiting to be scheduled
 	schedulingQueue k8sschedulingqueue.SchedulingQueue
@@ -133,6 +140,8 @@ type SchedulerCache struct {
 	// cancel is used to stop all goroutines started by scheduler cache,
 	// currently is only needed to cancel the scheduling queues' metrics async recorder
 	cancel context.CancelFunc
+
+	shardingMode string
 }
 
 // TaskCache encapsulates the task map with a seperate lock
@@ -282,7 +291,7 @@ func (sc *SchedulerCache) setBatchBindParallel() {
 	}
 }
 
-func newSchedulerCache(config *rest.Config, schedulerNames []string, defaultQueue string, nodeSelectors []string, nodeWorkers uint32, ignoredProvisioners []string, resyncPeriod time.Duration) *SchedulerCache {
+func newSchedulerCache(config *rest.Config, schedulerNames []string, defaultQueue string, nodeSelectors []string, nodeWorkers uint32, ignoredProvisioners []string, resyncPeriod time.Duration, shardingMode string, shardCoordinator *shard.ShardCoordinator) *SchedulerCache {
 	kubeClient, err := kubernetes.NewForConfig(config)
 	if err != nil {
 		panic(fmt.Sprintf("failed init kubeClient, with err: %v", err))
@@ -312,9 +321,11 @@ func newSchedulerCache(config *rest.Config, schedulerNames []string, defaultQueu
 		nodeSelectorLabels: make(map[string]sets.Empty),
 		imageStates:        make(map[string]*imageState),
 
-		NodeList:    []string{},
-		nodeWorkers: nodeWorkers,
-		taskCache:   NewTaskCache(),
+		NodeList:         []string{},
+		nodeWorkers:      nodeWorkers,
+		taskCache:        NewTaskCache(),
+		shardingMode:     shardingMode,
+		ShardCoordinator: shardCoordinator,
 	}
 
 	sc.resyncPeriod = resyncPeriod
@@ -360,7 +371,6 @@ func newSchedulerCache(config *rest.Config, schedulerNames []string, defaultQueu
 	)
 
 	sc.ConflictAwareBinder = NewConflictAwareBinder(sc, sc.schedulingQueue)
-
 	return sc
 }
 
@@ -475,6 +485,14 @@ func (sc *SchedulerCache) addEventHandler() {
 
 	vcinformers := vcinformer.NewSharedInformerFactory(sc.vcClient, sc.resyncPeriod)
 	sc.vcInformerFactory = vcinformers
+	if sc.shardingMode == options.HardShardingMode || sc.shardingMode == options.SoftShardingMode {
+		sc.nodeShardInformer = sc.vcInformerFactory.Shard().V1alpha1().NodeShards()
+		sc.nodeShardInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
+			AddFunc:    sc.AddNodeShard,
+			UpdateFunc: sc.UpdateNodeShard,
+			DeleteFunc: sc.DeleteNodeShard,
+		})
+	}
 
 	if utilfeature.DefaultFeatureGate.Enabled(kubefeatures.DynamicResourceAllocation) {
 		ctx := context.TODO()

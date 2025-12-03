@@ -37,6 +37,7 @@ import (
 	"volcano.sh/volcano/cmd/agent-scheduler/app/options"
 	schedcache "volcano.sh/volcano/pkg/agentscheduler/cache"
 	"volcano.sh/volcano/pkg/agentscheduler/framework"
+	"volcano.sh/volcano/pkg/agentscheduler/shard"
 	"volcano.sh/volcano/pkg/filewatcher"
 	schedulingapi "volcano.sh/volcano/pkg/scheduler/api"
 	"volcano.sh/volcano/pkg/scheduler/conf"
@@ -61,10 +62,14 @@ type Scheduler struct {
 	dumper             schedcache.Dumper
 	disableDefaultConf bool
 	workerCount        uint32
+	shardingMode       string
+	shardCoordinator   *shard.ShardCoordinator
 }
 
 type Worker struct {
-	framework *framework.Framework
+	framework        *framework.Framework
+	shardCoordinator *shard.ShardCoordinator
+	index            uint32
 }
 
 // NewAgentScheduler returns a Scheduler
@@ -78,8 +83,9 @@ func NewAgentScheduler(config *rest.Config, opt *options.ServerOption) (*Schedul
 			return nil, fmt.Errorf("failed creating filewatcher for %s: %v", opt.SchedulerConf, err)
 		}
 	}
+	shardCoordinator := shard.NewShardCoordinator(int(opt.ScheduleWorkerCount), opt.SchedulerNames[0], opt.ShardingMode)
 
-	cache := schedcache.New(config, opt.SchedulerNames, opt.DefaultQueue, opt.NodeSelector, opt.NodeWorkerThreads, opt.IgnoredCSIProvisioners, opt.ResyncPeriod)
+	cache := schedcache.New(config, opt, shardCoordinator)
 	scheduler := &Scheduler{
 		schedulerConf:      opt.SchedulerConf,
 		fileWatcher:        watcher,
@@ -88,6 +94,8 @@ func NewAgentScheduler(config *rest.Config, opt *options.ServerOption) (*Schedul
 		dumper:             schedcache.Dumper{Cache: cache, RootDir: opt.CacheDumpFileDir},
 		disableDefaultConf: opt.DisableDefaultSchedulerConfig,
 		workerCount:        opt.ScheduleWorkerCount,
+		shardingMode:       opt.ShardingMode,
+		shardCoordinator:   shardCoordinator,
 	}
 
 	return scheduler, nil
@@ -104,10 +112,8 @@ func (sched *Scheduler) Run(stopCh <-chan struct{}) {
 
 	klog.V(2).Infof("Scheduler completes Initialization and start to run %d workers", sched.workerCount)
 	for i := range sched.workerCount {
-		worker := &Worker{}
-		worker.framework = framework.NewFramework(sched.actions, sched.tiers, sched.cache, sched.configurations)
-		index := i
-		go wait.Until(func() { worker.runOnce(index) }, 0, stopCh)
+		worker := &Worker{framework.NewFramework(sched.actions, sched.tiers, sched.cache, sched.configurations), sched.shardCoordinator, i}
+		go wait.Until(func() { worker.runOnce() }, 0, stopCh)
 	}
 	if options.ServerOpts.EnableCacheDumper {
 		sched.dumper.ListenForSignal(stopCh)
@@ -118,10 +124,10 @@ func (sched *Scheduler) Run(stopCh <-chan struct{}) {
 
 // runOnce executes a single scheduling cycle. This function is called periodically
 // as defined by the Scheduler's schedule period.
-func (worker *Worker) runOnce(index uint32) {
-	klog.V(4).Infof("Start scheduling in worker %d ...", index)
+func (worker *Worker) runOnce() {
+	klog.V(4).Infof("Start scheduling in worker %d ...", worker.index)
 	scheduleStartTime := time.Now()
-	defer klog.V(4).Infof("End scheduling in worker %d ...", index)
+	defer klog.V(4).Infof("End scheduling in worker %d ...", worker.index)
 	// Load ConfigMap to check which action is enabled.
 	conf.EnabledActionMap = make(map[string]bool)
 	for _, action := range worker.framework.Actions {
@@ -141,9 +147,11 @@ func (worker *Worker) runOnce(index uint32) {
 	// Update snapshot from cache before scheduling
 	snapshot := worker.framework.GetSnapshot()
 	if err := worker.framework.Cache.UpdateSnapshot(snapshot); err != nil {
-		klog.Errorf("Failed to update snapshot in worker %d: %v, skip this scheduling cycle", index, err)
+		klog.Errorf("Failed to update snapshot in worker %d: %v, skip this scheduling cycle", worker.index, err)
 		return
 	}
+
+	schedCtx.NodesInShard = worker.shardCoordinator.GetAndSyncNodesForWorker(worker.index)
 
 	// TODO: Call OnCycleStart for all plugins
 	// worker.framework.OnCycleStart()

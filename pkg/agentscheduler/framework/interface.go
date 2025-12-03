@@ -17,6 +17,7 @@ limitations under the License.
 package framework
 
 import (
+	"k8s.io/apimachinery/pkg/util/sets"
 	k8sframework "k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"volcano.sh/volcano/pkg/scheduler/api"
@@ -28,6 +29,8 @@ type SchedulingContext struct {
 	Task *api.TaskInfo
 	// QueuedPodInfo is the original pod info from the scheduling queue
 	QueuedPodInfo *k8sframework.QueuedPodInfo
+	// NodesInShard is the nodes in shard of current scheduler
+	NodesInShard sets.Set[string]
 }
 
 // Action is the interface of agent scheduler action.
