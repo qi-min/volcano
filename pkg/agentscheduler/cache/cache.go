@@ -560,19 +560,15 @@ func (sc *SchedulerCache) Bind(ctx context.Context, bindContexts []*vcache.BindC
 	for index := range readyToBindTasks {
 		readyToBindTasks[index] = bindContexts[index].TaskInfo
 	}
-	tmp := time.Now()
 	errMsg := sc.Binder.Bind(sc.kubeClient, readyToBindTasks)
-	if len(errMsg) == 0 {
-		klog.V(3).Infof("bind ok, latency %v", time.Since(tmp))
-	} else {
-		klog.V(3).Infof("There are %d tasks in total and %d binds failed, latency %v", len(readyToBindTasks), len(errMsg), time.Since(tmp))
-	}
 
 	for _, bindContext := range bindContexts {
 		if reason, ok := errMsg[bindContext.TaskInfo.UID]; !ok {
+			// metrics.UpdateE2eSchedulingDurationByPod()
+			klog.V(3).InfoS("Bind task succeeded", "task", klog.KObj(bindContext.TaskInfo.Pod), "node", bindContext.TaskInfo.NodeName)
 			sc.Recorder.Eventf(bindContext.TaskInfo.Pod, v1.EventTypeNormal, "Scheduled", "Successfully assigned %v/%v to %v", bindContext.TaskInfo.Namespace, bindContext.TaskInfo.Name, bindContext.TaskInfo.NodeName)
 		} else {
-			unschedulableMsg := fmt.Sprintf("failed to bind to node %s: %s", bindContext.TaskInfo.NodeName, reason)
+			unschedulableMsg := fmt.Sprintf("failed to bind task %s/%s to node %s: %s", bindContext.TaskInfo.Namespace, bindContext.TaskInfo.Name, bindContext.TaskInfo.NodeName, reason)
 			if err := sc.TaskUnschedulable(bindContext.TaskInfo, schedulingapi.PodReasonSchedulerError, unschedulableMsg); err != nil {
 				klog.ErrorS(err, "Failed to update pod status when bind task error", "task", bindContext.TaskInfo.Name)
 			}
