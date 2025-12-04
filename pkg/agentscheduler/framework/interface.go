@@ -17,6 +17,8 @@ limitations under the License.
 package framework
 
 import (
+	"time"
+
 	k8sframework "k8s.io/kubernetes/pkg/scheduler/framework"
 
 	"volcano.sh/volcano/pkg/scheduler/api"
@@ -24,6 +26,8 @@ import (
 
 // SchedulingContext contains all information needed for scheduling a task
 type SchedulingContext struct {
+	// StartTime is the schedule start time of the task
+	StartTime time.Time
 	// Task is the task to be scheduled
 	Task *api.TaskInfo
 	// QueuedPodInfo is the original pod info from the scheduling queue

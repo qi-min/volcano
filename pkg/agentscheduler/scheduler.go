@@ -120,7 +120,6 @@ func (sched *Scheduler) Run(stopCh <-chan struct{}) {
 // as defined by the Scheduler's schedule period.
 func (worker *Worker) runOnce(index uint32) {
 	klog.V(4).Infof("Start scheduling in worker %d ...", index)
-	scheduleStartTime := time.Now()
 	defer klog.V(4).Infof("End scheduling in worker %d ...", index)
 	// Load ConfigMap to check which action is enabled.
 	conf.EnabledActionMap = make(map[string]bool)
@@ -149,7 +148,6 @@ func (worker *Worker) runOnce(index uint32) {
 	// worker.framework.OnCycleStart()
 
 	defer func() {
-		metrics.UpdateE2eDuration(metrics.Duration(scheduleStartTime))
 		// TODO: Call OnCycleEnd for all plugins
 		// worker.framework.OnCycleEnd()
 		worker.framework.ClearCycleState()
@@ -187,7 +185,10 @@ func (worker *Worker) generateNextSchedulingContext() (*framework.SchedulingCont
 		return nil, nil
 	}
 
+	startTime := time.Now()
+
 	return &framework.SchedulingContext{
+		StartTime:     startTime,
 		Task:          task,
 		QueuedPodInfo: podInfo,
 	}, nil

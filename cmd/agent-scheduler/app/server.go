@@ -19,6 +19,7 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 
 	"volcano.sh/apis/pkg/apis/helpers"
@@ -74,6 +75,11 @@ func Run(opt *options.ServerOption) error {
 		if err := helpers.StartHealthz(opt.HealthzBindAddress, "volcano-agent-scheduler", opt.CaCertData, opt.CertData, opt.KeyData); err != nil {
 			return err
 		}
+	}
+
+	if opt.EnableMetrics {
+		mux := http.NewServeMux()
+		mux.Handle("/metrics", commonutil.PromHandler())
 	}
 
 	ctx := signals.SetupSignalContext()
