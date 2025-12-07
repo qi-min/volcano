@@ -18,6 +18,7 @@ package cache
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"k8s.io/klog/v2"
 
@@ -27,20 +28,21 @@ import (
 )
 
 type ShardCoordinator struct {
-	schedulerShardName string
-	workerStates       map[uint32]*workerNodeShardState
-	nodeShards         map[string]*api.NodeShardInfo // node shards for all schedulers
-	schedulerNodeShard *api.NodeShardInfo            // node shard for this scheduler
-	usedNodeInCache    sets.Set[string]
-	mutex              sync.RWMutex
-	shardingEnabled    bool
-	cache              Cache
+	schedulerShardName     string
+	workerStates           []*workerNodeShardState
+	nodeShardInfos         map[string]*api.NodeShardInfo // node shards for all schedulers
+	schedulerNodeShardInfo *api.NodeShardInfo            // node shard for this scheduler
+	nodeToUse              sets.Set[string]              // nodes should be used by workers
+	mutex                  sync.RWMutex
+	shardingEnabled        bool
+	lastSynced             int64 //last synced revision to nodeshard cr
+	latestRevision         int64 //last revision of nodeshard cr change
+	cache                  Cache
 }
 
 type workerNodeShardState struct {
-	nodesInUse           sets.Set[string]
-	mayHaveNodesToRemove bool // nodes may need be removed from inUsed list, avoid checking sets everytime
-	mayHaveNodesToAdd    bool // nodes may need be added into inUsed list, avoid checking sets everytime
+	revision                    int64
+	schedulingWithUnsyncedNodes bool
 }
 
 func NewShardCoordinator(cache Cache, workerCount int, schedulerName string, shardingMode string) *ShardCoordinator {
@@ -48,67 +50,26 @@ func NewShardCoordinator(cache Cache, workerCount int, schedulerName string, sha
 
 	return &ShardCoordinator{
 		schedulerShardName: schedulerName,
-		workerStates:       make(map[uint32]*workerNodeShardState, workerCount),
+		workerStates:       make([]*workerNodeShardState, workerCount),
 		shardingEnabled:    shardingMode == options.HardShardingMode || shardingMode == options.SoftShardingMode,
 		cache:              cache,
 	}
 }
 
-// GetAndSyncNodesForWorker get nodes to be used and triger nodeshard sync if necessary
-func (sm *ShardCoordinator) GetAndSyncNodesForWorker(index uint32) sets.Set[string] {
-	nodeToUse := sets.Set[string]{}
-	if !sm.shardingEnabled {
-		return nodeToUse
+// GetNodesForWorker get nodes can be involved in worker
+func (sm *ShardCoordinator) GetNodesForWorker(index int) sets.Set[string] {
+	klog.V(5).Infof("Worker %d will schedule with nodes%v", index, sm.nodeToUse.UnsortedList())
+	if index > len(sm.workerStates) {
+		klog.Errorf("Worker %d does not exist, no nodes are returned", index)
+		return sets.Set[string]{}
 	}
-	if sm.schedulerNodeShard == nil {
-		//No NodeShard is created for scheuler
-		return nodeToUse
-	}
-	tryUpdate := false
-	state, exist := sm.workerStates[index]
-	if !exist {
-		sm.mutex.Lock()
-		if len(sm.schedulerNodeShard.NodeInUse) > 0 {
-			//use inused nodes as initial state when worker startup
-			state = &workerNodeShardState{sm.schedulerNodeShard.NodeInUse, true, true}
-			sm.workerStates[index] = state
-			klog.V(5).Infof("worker %d: shard in worker is initialzed with inUse nodes in cr", index)
-		} else {
-			//no inused nodes set before, get current usable nodes
-			state = &workerNodeShardState{sm.getUsableNodes(), false, false}
-			sm.workerStates[index] = state
-			tryUpdate = true
-			klog.V(5).Infof("worker %d: no inUser node found in CR, get %d(%d) nodes from desired nodes in cr", index, len(state.nodesInUse), len(sm.schedulerNodeShard.NodeDesired))
-		}
-		sm.mutex.Unlock()
-	}
-
-	sm.mutex.RLock()
-	if state.mayHaveNodesToAdd && sm.isNodeAddable() {
-		//all disired node can be used
-		nodeToUse = sm.schedulerNodeShard.NodeDesired
-		state.nodesInUse = nodeToUse
-		tryUpdate = true
-	} else if state.mayHaveNodesToRemove {
-		//move out nodes that not belong to this shard.
-		//use usedNodeInCache to check in case nodesInUse is not synchronized between NodeShard CR and local Cache
-		nodeToUse = sm.usedNodeInCache.Intersection(sm.schedulerNodeShard.NodeDesired)
-		if !nodeToUse.Equal(state.nodesInUse) {
-			state.nodesInUse = nodeToUse
-			tryUpdate = true
-		}
+	state := sm.workerStates[index]
+	if state == nil {
+		sm.workerStates[index] = &workerNodeShardState{revision: sm.latestRevision}
 	} else {
-		nodeToUse = state.nodesInUse
+		state.revision = sm.latestRevision
 	}
-	state.mayHaveNodesToRemove = false
-	state.mayHaveNodesToAdd = false
-	sm.mutex.RUnlock()
-
-	if tryUpdate && sm.shouldUpdateInUse() {
-		sm.usedNodeInCache = state.nodesInUse
-		go sm.updateNodesShardStatus()
-	}
-	return nodeToUse
+	return sm.nodeToUse
 }
 
 // RefreshNodeShards update node shards cached in coordinator
@@ -116,71 +77,110 @@ func (sm *ShardCoordinator) RefreshNodeShards(nodeShards map[string]*api.NodeSha
 	if !sm.shardingEnabled {
 		return
 	}
+
 	sm.mutex.Lock()
 	defer sm.mutex.Unlock()
-	sm.nodeShards = nodeShards
+	sm.nodeShardInfos = nodeShards
 	shardForSchedulerFound := false
 	for shardName, shard := range nodeShards {
 		if shardName == sm.schedulerShardName {
-			sm.schedulerNodeShard = shard
+			sm.schedulerNodeShardInfo = shard
 			shardForSchedulerFound = true
 			break
 		}
 	}
 	if !shardForSchedulerFound && sm.shardingEnabled {
-		klog.Errorf("sharding is enabled but not shard is set for scheduler")
-		sm.schedulerNodeShard = nil
+		klog.Errorf("Sharding is enabled but not shard is defined for this scheduler!")
+		sm.schedulerNodeShardInfo = nil
 		return
 	}
-	curentDesiredNodes := sm.schedulerNodeShard.NodeDesired
-	if !curentDesiredNodes.Equal(sm.schedulerNodeShard.NodeDesired) {
-		for _, state := range sm.workerStates {
-			//new shard changed desired nodes, nodes used in worker may need to be updated
-			state.mayHaveNodesToAdd = true
-			state.mayHaveNodesToRemove = true
-		}
+
+	if usableNodes := sm.getUsableNodes(); !sm.nodeToUse.Equal(usableNodes) {
+		atomic.AddInt64(&sm.latestRevision, 1)
+		sm.nodeToUse = usableNodes
+		klog.V(3).Infof("Try to update nodeshard status after nodeshart refresh")
+		sm.tryUpdateNodeShardStatus()
 	}
 }
 
-func (sm *ShardCoordinator) updateNodesShardStatus() {
-	sm.cache.UpdateNodesShardStatus(sm.schedulerShardName, sm.usedNodeInCache)
-}
-
-// shouldUpdateInUse check whehther shard status need be updated. Retun true if all worker states are the same and NodeInUse different from NodeShardInfo
-func (sm *ShardCoordinator) shouldUpdateInUse() bool {
-	if len(sm.workerStates) <= 0 {
-		return false
+func (sm *ShardCoordinator) tryUpdateNodeShardStatus() {
+	latest := atomic.LoadInt64(&sm.latestRevision)
+	//skip upate if status has been updated
+	if atomic.LoadInt64(&sm.lastSynced) >= latest {
+		return
 	}
-	//check whether inuse nodes in all workers are the same
-	nodeSet := sm.workerStates[0].nodesInUse
-	for _, state := range sm.workerStates {
-		if len(state.nodesInUse) > 0 && !nodeSet.Equal(state.nodesInUse) {
-			return false
+
+	for index, state := range sm.workerStates {
+		if state == nil {
+			state = &workerNodeShardState{}
+			sm.workerStates[index] = state
+		}
+		//skip update if any worker is scheduling with nodes before this revision
+		if state.schedulingWithUnsyncedNodes && state.revision < latest {
+			klog.V(3).Infof("Worker %d is scheduling with old nodes, skip nodeshard update", index)
+			return
 		}
 	}
-	return !nodeSet.Equal(sm.schedulerNodeShard.NodeInUse)
+
+	atomic.StoreInt64(&sm.lastSynced, latest)
+	sm.cache.UpdateNodesShardStatus(sm.schedulerShardName, sm.nodeToUse)
 }
 
-// isNodeAddable check whether newly added nodes in desired nodes can be used. Return true is all other shard do not have nodes to remove
-func (sm *ShardCoordinator) isNodeAddable() bool {
-	if len(sm.schedulerNodeShard.NodeToAdd) <= 0 {
-		return false
+func (sm *ShardCoordinator) OnWorkerStartSchedulingCycle(index int) {
+	if index > len(sm.workerStates) {
+		klog.Errorf("Worker %d does not exist", index)
+		return
 	}
-	for shardName, nodeShard := range sm.nodeShards {
-		if shardName != sm.schedulerShardName {
-			if len(nodeShard.NodeToRemove) > 0 {
-				//other schedulers haven't moven nodes out
-				return false
-			}
+
+	latest := atomic.LoadInt64(&sm.latestRevision)
+	state := sm.workerStates[index]
+	if state == nil {
+		sm.mutex.Lock()
+		sm.workerStates[index] = &workerNodeShardState{
+			revision: latest,
 		}
+		sm.mutex.Unlock()
+		return
 	}
-	return true
+	//worker has pickup nodes in latest revision, avoid acquiring lock when no revision changed
+	if state.revision == latest {
+		return
+	}
+	//worker start to use nodes in latest revision
+	sm.mutex.Lock()
+	state.schedulingWithUnsyncedNodes = true
+	sm.mutex.Unlock()
+}
+
+func (sm *ShardCoordinator) OnWorkerEndSchedulingCycle(index int) {
+	if index > len(sm.workerStates) {
+		klog.Errorf("Worker %d does not exist", index)
+		return
+	}
+	latest := atomic.LoadInt64(&sm.latestRevision)
+	state := sm.workerStates[index]
+	if state == nil {
+		klog.Errorf("Worker %d state was not initialized before", index)
+		return
+	}
+	//worker has pickup nodes in latest revision, avoid acquiring lock when no revision changed
+	if state.revision == latest {
+		return
+	}
+
+	// worker used nodes in old revision, try to update nodeshard status after worker end
+	// because worker in next schedule must pick new nodes.
+	sm.mutex.Lock()
+	state.schedulingWithUnsyncedNodes = false
+	klog.V(3).Infof("Try to update nodeshard status after worker %d end scheduling cycle", index)
+	sm.tryUpdateNodeShardStatus()
+	sm.mutex.Unlock()
 }
 
 // getUsableNodes get usable nodes based on desired nodes
 func (sm *ShardCoordinator) getUsableNodes() sets.Set[string] {
-	nodes := sm.schedulerNodeShard.NodeDesired
-	for shardName, nodeShard := range sm.nodeShards {
+	nodes := sm.schedulerNodeShardInfo.NodeDesired
+	for shardName, nodeShard := range sm.nodeShardInfos {
 		if shardName != sm.schedulerShardName {
 			nodes = nodes.Difference(nodeShard.NodeInUse)
 		}
