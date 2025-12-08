@@ -30,6 +30,7 @@ import (
 	componentbaseoptions "k8s.io/component-base/config/options"
 	"k8s.io/component-base/featuregate"
 
+	voptions "volcano.sh/volcano/cmd/scheduler/app/options"
 	"volcano.sh/volcano/pkg/features"
 	"volcano.sh/volcano/pkg/kube"
 	commonutil "volcano.sh/volcano/pkg/util"
@@ -56,7 +57,7 @@ func TestAddFlags(t *testing.T) {
 	fs.Parse(args)
 
 	// This is a snapshot of expected options parsed by args.
-	expected := &ServerOption{
+	expected := &ServerOption{ServerOption: &voptions.ServerOption{
 		SchedulerNames: []string{agentSchedulerName},
 		SchedulePeriod: 5 * time.Minute,
 		ResyncPeriod:   0,
@@ -84,8 +85,8 @@ func TestAddFlags(t *testing.T) {
 		NodeWorkerThreads:             defaultNodeWorkers,
 		CacheDumpFileDir:              "/tmp",
 		DisableDefaultSchedulerConfig: false,
-		ScheduleWorkerCount:           defaultScheduleWorkerCount,
-	}
+	},
+		ScheduleWorkerCount: defaultScheduleWorkerCount}
 	expectedFeatureGates := map[featuregate.Feature]bool{
 		features.PodDisruptionBudgetsSupport: false,
 		features.VolcanoJobSupport:           true,

@@ -214,7 +214,7 @@ func SelectBestNodeAndScore(nodeScores map[float64][]*api.NodeInfo) (*api.NodeIn
 }
 
 // SelectBestNodesAndScores returns the best N node whose score is highest N score, pick one randomly if there are many nodes with same score.
-func SelectBestNodesAndScores(nodeScores map[float64][]*api.NodeInfo, count int) ([]*api.NodeInfo, []float64) {
+func SelectBestNodesAndScores(nodeScores map[float64][]*api.NodeInfo, nodesInShard sets.Set[string], shardMode string, count int) ([]*api.NodeInfo, []float64) {
 	bestNodes := []*api.NodeInfo{}
 	scores := []float64{}
 	if count <= 0 || len(nodeScores) == 0 {

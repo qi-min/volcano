@@ -61,11 +61,14 @@ type Scheduler struct {
 	metricsConf        map[string]string
 	dumper             schedcache.Dumper
 	disableDefaultConf bool
-	workerCount        uint32
+	workerCount        int
+	shardingMode       string
 }
 
 type Worker struct {
 	framework *framework.Framework
+	index     int
+	cache     schedcache.Cache
 }
 
 // NewAgentScheduler returns a Scheduler
@@ -79,8 +82,7 @@ func NewAgentScheduler(config *rest.Config, opt *options.ServerOption) (*Schedul
 			return nil, fmt.Errorf("failed creating filewatcher for %s: %v", opt.SchedulerConf, err)
 		}
 	}
-
-	cache := schedcache.New(config, opt.SchedulerNames, opt.DefaultQueue, opt.NodeSelector, opt.NodeWorkerThreads, opt.IgnoredCSIProvisioners, opt.ResyncPeriod)
+	cache := schedcache.New(config, opt)
 	scheduler := &Scheduler{
 		schedulerConf:      opt.SchedulerConf,
 		fileWatcher:        watcher,
@@ -88,7 +90,8 @@ func NewAgentScheduler(config *rest.Config, opt *options.ServerOption) (*Schedul
 		schedulePeriod:     opt.SchedulePeriod,
 		dumper:             schedcache.Dumper{Cache: cache, RootDir: opt.CacheDumpFileDir},
 		disableDefaultConf: opt.DisableDefaultSchedulerConfig,
-		workerCount:        opt.ScheduleWorkerCount,
+		workerCount:        int(opt.ScheduleWorkerCount),
+		shardingMode:       opt.ShardingMode,
 	}
 
 	return scheduler, nil
@@ -105,10 +108,13 @@ func (sched *Scheduler) Run(stopCh <-chan struct{}) {
 
 	klog.V(2).Infof("Scheduler completes Initialization and start to run %d workers", sched.workerCount)
 	for i := range sched.workerCount {
-		worker := &Worker{}
-		worker.framework = framework.NewFramework(sched.actions, sched.tiers, sched.cache, sched.configurations)
-		index := i
-		go wait.Until(func() { worker.runOnce(index) }, 0, stopCh)
+		fwk := framework.NewFramework(sched.actions, sched.tiers, sched.cache, sched.configurations)
+		worker := &Worker{
+			framework: fwk,
+			index:     i,
+			cache:     sched.cache,
+		}
+		go wait.Until(func() { worker.runOnce() }, 0, stopCh)
 	}
 	if options.ServerOpts.EnableCacheDumper {
 		sched.dumper.ListenForSignal(stopCh)
@@ -119,10 +125,10 @@ func (sched *Scheduler) Run(stopCh <-chan struct{}) {
 
 // runOnce executes a single scheduling cycle. This function is called periodically
 // as defined by the Scheduler's schedule period.
-func (worker *Worker) runOnce(index uint32) {
-	klog.V(4).Infof("Start scheduling in worker %d ...", index)
+func (worker *Worker) runOnce() {
+	klog.V(4).Infof("Start scheduling in worker %d ...", worker.index)
 	scheduleStartTime := time.Now()
-	defer klog.V(4).Infof("End scheduling in worker %d ...", index)
+	defer klog.V(4).Infof("End scheduling in worker %d ...", worker.index)
 	// Load ConfigMap to check which action is enabled.
 	conf.EnabledActionMap = make(map[string]bool)
 	for _, action := range worker.framework.Actions {
@@ -142,9 +148,12 @@ func (worker *Worker) runOnce(index uint32) {
 	// Update snapshot from cache before scheduling
 	snapshot := worker.framework.GetSnapshot()
 	if err := worker.framework.Cache.UpdateSnapshot(snapshot); err != nil {
-		klog.Errorf("Failed to update snapshot in worker %d: %v, skip this scheduling cycle", index, err)
+		klog.Errorf("Failed to update snapshot in worker %d: %v, skip this scheduling cycle", worker.index, err)
 		return
 	}
+
+	schedCtx.NodesInShard = worker.cache.GetNodesForWorker(worker.index)
+	worker.cache.OnWorkerStartSchedulingCycle(worker.index)
 
 	// TODO: Call OnCycleStart for all plugins
 	// worker.framework.OnCycleStart()
@@ -153,6 +162,7 @@ func (worker *Worker) runOnce(index uint32) {
 		metrics.UpdateE2eDuration(metrics.Duration(scheduleStartTime))
 		// TODO: Call OnCycleEnd for all plugins
 		// worker.framework.OnCycleEnd()
+		worker.cache.OnWorkerEndSchedulingCycle(worker.index)
 		worker.framework.ClearCycleState()
 	}()
 

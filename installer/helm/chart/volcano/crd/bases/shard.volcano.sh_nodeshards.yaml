@@ -16,9 +16,6 @@ spec:
   scope: Cluster
   versions:
   - additionalPrinterColumns:
-    - jsonPath: .spec.schedulerName
-      name: SCHEDULER
-      type: string
     - jsonPath: .metadata.creationTimestamp
       name: AGE
       type: date
@@ -54,14 +51,8 @@ spec:
                 items:
                   type: string
                 type: array
-              schedulerName:
-                description: |-
-                  SchedulerName indicates which scheduler should handle this NodeShard.
-                  Required.
-                type: string
             required:
             - nodesDesired
-            - schedulerName
             type: object
           status:
             description: |-
@@ -94,4 +85,5 @@ spec:
         type: object
     served: true
     storage: true
-    subresources: {}
+    subresources:
+      status: {}
