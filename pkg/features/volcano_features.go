@@ -46,6 +46,11 @@ const (
 
 	// CronVolcanoJobSupport can identify and schedule volcano cronjob.
 	CronVolcanoJobSupport featuregate.Feature = "CronVolcanoJobSupport"
+
+	// SchedulerQueueingHints allows the scheduler to focus only on events of interest, preventing useless events from triggering requeues.
+	// It's introduced from kube-scheduler but Volcano needs to consider compatibility, and volcano haven't implemented queueing hint yet,
+	// so it is self-maintained and set to false by default
+	SchedulerQueueingHints featuregate.Feature = "SchedulerQueueingHints"
 )
 
 func init() {
@@ -59,7 +64,8 @@ var defaultVolcanoFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec
 	QueueCommandSync:            {Default: true, PreRelease: featuregate.Alpha},
 	PriorityClass:               {Default: true, PreRelease: featuregate.Alpha},
 	// CSIStorage is explicitly set to false by default.
-	CSIStorage:            {Default: false, PreRelease: featuregate.Alpha},
-	ResourceTopology:      {Default: true, PreRelease: featuregate.Alpha},
-	CronVolcanoJobSupport: {Default: true, PreRelease: featuregate.Alpha},
+	CSIStorage:             {Default: false, PreRelease: featuregate.Alpha},
+	ResourceTopology:       {Default: true, PreRelease: featuregate.Alpha},
+	CronVolcanoJobSupport:  {Default: true, PreRelease: featuregate.Alpha},
+	SchedulerQueueingHints: {Default: false, PreRelease: featuregate.Alpha},
 }

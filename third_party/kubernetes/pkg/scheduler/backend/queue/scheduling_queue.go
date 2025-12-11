@@ -56,6 +56,8 @@ import (
 	"k8s.io/kubernetes/pkg/scheduler/metrics"
 	"k8s.io/kubernetes/pkg/scheduler/util"
 	"k8s.io/utils/clock"
+
+	vcfeatures "volcano.sh/volcano/pkg/features"
 )
 
 const (
@@ -347,7 +349,7 @@ func NewPriorityQueue(
 		opt(&options)
 	}
 
-	isSchedulingQueueHintEnabled := utilfeature.DefaultFeatureGate.Enabled(features.SchedulerQueueingHints)
+	isSchedulingQueueHintEnabled := utilfeature.DefaultFeatureGate.Enabled(vcfeatures.SchedulerQueueingHints)
 	isPopFromBackoffQEnabled := utilfeature.DefaultFeatureGate.Enabled(features.SchedulerPopFromBackoffQ)
 	lessConverted := convertLessFn(lessFn)
 
