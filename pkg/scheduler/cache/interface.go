@@ -92,6 +92,15 @@ type Cache interface {
 
 	// SharedDRAManager returns the shared DRAManager
 	SharedDRAManager() framework.SharedDRAManager
+
+	//UpdateNodeShardStatus update status in nodeshard
+	UpdateNodeShardStatus(nodeShardName string) error
+
+	//OnSessionOpen is called before session open
+	OnSessionOpen()
+
+	//OnSessionClose is called after session close
+	OnSessionClose()
 }
 
 // Binder interface for binding task and hostname
